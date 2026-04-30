@@ -1,0 +1,80 @@
+package search
+
+import (
+	"context"
+	"log"
+
+	"github.com/thiscloud/ia-buscar/internal/cache"
+	"github.com/thiscloud/ia-buscar/internal/memory"
+	"github.com/thiscloud/ia-buscar/pkg/types"
+)
+
+type ConnectorManager struct {
+	connectors map[string]types.SearchConnector
+	cache      *cache.Service
+	memory     *memory.Client
+}
+
+func NewConnectorManager(cacheSvc *cache.Service, memClient *memory.Client) *ConnectorManager {
+	return &ConnectorManager{
+		connectors: make(map[string]types.SearchConnector),
+		cache:      cacheSvc,
+		memory:     memClient,
+	}
+}
+
+func (m *ConnectorManager) Register(connector types.SearchConnector) {
+	m.connectors[connector.Name()] = connector
+	log.Printf("[connector_manager] registered: %s", connector.Name())
+}
+
+func (m *ConnectorManager) Search(ctx context.Context, source string, req *types.SearchRequest) (*types.SearchResponse, error) {
+	conn, ok := m.connectors[source]
+	if !ok {
+		return &types.SearchResponse{
+			Query:      req.Query,
+			Results:    []types.SearchResultItem{},
+			Errors:     []string{"unknown source: " + source},
+			SourcesUsed: []string{source},
+		}, nil
+	}
+	return conn.Search(ctx, req)
+}
+
+func (m *ConnectorManager) SearchAll(ctx context.Context, req *types.SearchRequest) (*types.SearchResponse, error) {
+	var allResults []types.SearchResultItem
+	sourcesUsed := make(map[string]bool)
+	var errors []string
+
+	for name, conn := range m.connectors {
+		result, err := conn.Search(ctx, req)
+		if err != nil {
+			errors = append(errors, name+": "+err.Error())
+			continue
+		}
+		allResults = append(allResults, result.Results...)
+		for _, s := range result.SourcesUsed {
+			sourcesUsed[s] = true
+		}
+		if result.Errors != nil {
+			errors = append(errors, result.Errors...)
+		}
+	}
+
+	sources := make([]string, 0, len(sourcesUsed))
+	for s := range sourcesUsed {
+		sources = append(sources, s)
+	}
+
+	return &types.SearchResponse{
+		Query:       req.Query,
+		Results:     allResults,
+		SourcesUsed: sources,
+		Errors:      errors,
+	}, nil
+}
+
+func (m *ConnectorManager) GetConnector(name string) (types.SearchConnector, bool) {
+	conn, ok := m.connectors[name]
+	return conn, ok
+}

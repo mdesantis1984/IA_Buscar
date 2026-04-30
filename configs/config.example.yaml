@@ -1,0 +1,6 @@
+transport: stdio
+http_addr: :8080
+searxng_url: http://localhost:8888
+cache_ttl: 300
+memory_url: http://127.0.0.1:7438
+memory_apikey: ""

@@ -1,0 +1,201 @@
+package connectors
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/thiscloud/ia-buscar/internal/cache"
+	"github.com/thiscloud/ia-buscar/internal/memory"
+	"github.com/thiscloud/ia-buscar/pkg/types"
+)
+
+type WebConnector struct {
+	searxngURL string
+	cacheSvc   *cache.Service
+	memClient  *memory.Client
+	httpClient *http.Client
+}
+
+func NewWebConnector(searxngURL string, cacheSvc *cache.Service, memClient *memory.Client) *WebConnector {
+	return &WebConnector{
+		searxngURL: searxngURL,
+		cacheSvc:   cacheSvc,
+		memClient:  memClient,
+		httpClient: &http.Client{Timeout: 60 * time.Second},
+	}
+}
+
+func (c *WebConnector) Name() string { return "web" }
+
+func (c *WebConnector) Search(ctx context.Context, req *types.SearchRequest) (*types.SearchResponse, error) {
+	start := time.Now()
+	query := strings.TrimSpace(req.Query)
+	maxResults := getMaxResults(req.MaxResults, 10)
+
+	cacheKey := cache.GenerateCacheKey(query, []string{"searxng", req.TimeRange})
+	if cached, ok, _ := c.cacheSvc.Get(ctx, cacheKey); ok {
+		log.Printf("[web] cache hit for query: %s", query)
+		cachedResp := &types.SearchResponse{}
+		if err := json.Unmarshal(cached.Payload, cachedResp); err == nil {
+			cachedResp.Cached = true
+			return cachedResp, nil
+		}
+	}
+
+	var results []types.SearchResultItem
+	var err error
+
+	if c.searxngURL != "" {
+		results, err = c.searchSearxng(ctx, query, maxResults, req)
+	} else {
+		results, err = c.searchGeneric(ctx, query, maxResults, req)
+	}
+
+	if err != nil {
+		log.Printf("[web] search error: %v", err)
+	}
+
+	resp := &types.SearchResponse{
+		Query:       req.Query,
+		Results:     results,
+		SourcesUsed: []string{"searxng"},
+		Cached:      false,
+	}
+	if len(results) == 0 && err != nil {
+		resp.Warnings = []string{err.Error()}
+	}
+
+	c.saveToMemory(ctx, query, len(results), time.Since(start))
+	c.cacheResults(ctx, cacheKey, resp)
+
+	log.Printf("[web] search completed: query=%s, results=%d, latency=%v", query, len(results), time.Since(start))
+	return resp, nil
+}
+
+func (c *WebConnector) searchSearxng(ctx context.Context, query string, maxResults int, req *types.SearchRequest) ([]types.SearchResultItem, error) {
+	time.Sleep(500 * time.Millisecond)
+
+	params := url.Values{}
+	params.Set("q", query)
+	params.Set("format", "json")
+	params.Set("engines", "")
+	if req.Language != "" {
+		params.Set("language", req.Language)
+	}
+	if req.TimeRange != "" {
+		params.Set("time_range", req.TimeRange)
+	}
+	if req.SafeSearch {
+		params.Set("safesearch", "1")
+	}
+
+	apiURL := c.searxngURL + "/search?" + params.Encode()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return []types.SearchResultItem{}, err
+	}
+	httpReq.Header.Set("Accept", "application/json")
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return []types.SearchResultItem{}, fmt.Errorf("searxng request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return []types.SearchResultItem{}, fmt.Errorf("searxng error: %d", resp.StatusCode)
+	}
+
+	var searxngResp struct {
+		Results []struct {
+			Title       string      `json:"title"`
+			URL         string      `json:"url"`
+			Content     string      `json:"content"`
+			Source      string      `json:"source"`
+			Engine      string      `json:"engine"`
+			ParsedURL   interface{} `json:"parsed_url"`
+		} `json:"results"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&searxngResp); err != nil {
+		return []types.SearchResultItem{}, fmt.Errorf("searxng decode error: %w", err)
+	}
+
+	results := make([]types.SearchResultItem, 0, len(searxngResp.Results))
+	for i, item := range searxngResp.Results {
+		if i >= maxResults {
+			break
+		}
+		parsedDomain := extractDomain(item.ParsedURL)
+		results = append(results, types.SearchResultItem{
+			Title:   item.Title,
+			URL:     item.URL,
+			Snippet: item.Content,
+			Source:  "searxng",
+			Type:    "web",
+			Score:   float64(maxResults - i),
+			CitationID: fmt.Sprintf("web:%s", parsedDomain),
+		})
+	}
+
+	return results, nil
+}
+
+func (c *WebConnector) searchGeneric(ctx context.Context, query string, maxResults int, req *types.SearchRequest) ([]types.SearchResultItem, error) {
+	return []types.SearchResultItem{
+		{
+			Title:   "SearxNG not configured",
+			URL:     "",
+			Snippet: "Web search requires SearxNG to be configured. Set --searxng-url flag.",
+			Source:  "searxng",
+			Type:    "web",
+			Score:   0,
+			CitationID: "searxng:unconfigured",
+		},
+	}, nil
+}
+
+func (c *WebConnector) saveToMemory(ctx context.Context, query string, count int, latency time.Duration) {
+	if c.memClient == nil {
+		return
+	}
+	c.memClient.Save(ctx, &memory.Observation{
+		Title:    fmt.Sprintf("Web search: %s", query),
+		Content:  fmt.Sprintf("**Query**: %s\n**Results**: %d\n**Latency**: %v", query, count, latency),
+		Type:     "search",
+		TopicKey: fmt.Sprintf("web-%s", sanitizeTopicKey(query)),
+	})
+}
+
+func (c *WebConnector) cacheResults(ctx context.Context, cacheKey string, resp *types.SearchResponse) {
+	if c.cacheSvc == nil {
+		return
+	}
+	data, err := json.Marshal(resp)
+	if err != nil {
+		return
+	}
+	c.cacheSvc.Set(ctx, cacheKey, data, resp.SourcesUsed)
+}
+
+func extractDomain(parsedURL interface{}) string {
+	if parsedURL == nil {
+		return "unknown"
+	}
+	switch v := parsedURL.(type) {
+	case map[string]interface{}:
+		if domain, ok := v["domain"].(string); ok {
+			return domain
+		}
+	case string:
+		return v
+	}
+	return "unknown"
+}

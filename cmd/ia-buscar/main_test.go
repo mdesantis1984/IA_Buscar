@@ -1,0 +1,54 @@
+package main
+
+import (
+	"context"
+	"testing"
+
+	"github.com/thiscloud/ia-buscar/internal/cache"
+	"github.com/thiscloud/ia-buscar/internal/fetch"
+	"github.com/thiscloud/ia-buscar/internal/mcp"
+	"github.com/thiscloud/ia-buscar/internal/search"
+	"github.com/thiscloud/ia-buscar/internal/synthesis"
+)
+
+func TestServerStart(t *testing.T) {
+	cm := search.NewConnectorManager(nil, nil)
+	fetchSvc := fetch.NewFetcherService(5000)
+	synthSvc := synthesis.NewService()
+	cacheSvc := cache.NewService(300)
+	historySvc := cache.NewHistoryService("")
+	server := mcp.NewServer(cm, "stdio", ":8080", "http://localhost:8888", 300, "http://127.0.0.1:7438", "", 5000, fetchSvc, synthSvc, cacheSvc, historySvc)
+	if server == nil {
+		t.Fatal("expected non-nil server")
+	}
+}
+
+func TestToolsCount(t *testing.T) {
+	cm := search.NewConnectorManager(nil, nil)
+	fetchSvc := fetch.NewFetcherService(5000)
+	synthSvc := synthesis.NewService()
+	cacheSvc := cache.NewService(300)
+	historySvc := cache.NewHistoryService("")
+	server := mcp.NewServer(cm, "stdio", ":8080", "http://localhost:8888", 300, "http://127.0.0.1:7438", "", 5000, fetchSvc, synthSvc, cacheSvc, historySvc)
+	tools := server.Tools()
+	if len(tools) != 28 {
+		t.Errorf("expected 28 tools, got %d", len(tools))
+	}
+}
+
+func TestHandleInitialize(t *testing.T) {
+	cm := search.NewConnectorManager(nil, nil)
+	fetchSvc := fetch.NewFetcherService(5000)
+	synthSvc := synthesis.NewService()
+	cacheSvc := cache.NewService(300)
+	historySvc := cache.NewHistoryService("")
+	server := mcp.NewServer(cm, "stdio", ":8080", "http://localhost:8888", 300, "http://127.0.0.1:7438", "", 5000, fetchSvc, synthSvc, cacheSvc, historySvc)
+	result, err := server.HandleInitialize(context.Background(), []byte(`{"clientId": "test"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m := result.(map[string]interface{})
+	if m["serverInfo"] == nil {
+		t.Error("expected serverInfo in result")
+	}
+}

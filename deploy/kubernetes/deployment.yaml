@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ia-buscar
+  labels:
+    app: ia-buscar
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ia-buscar
+  template:
+    metadata:
+      labels:
+        app: ia-buscar
+    spec:
+      containers:
+        - name: ia-buscar
+          image: ia-buscar:latest
+          ports:
+            - containerPort: 5000
+          env:
+            - name: SEARXNG_URL
+              value: "http://searxng:8080"
+            - name: MEMORY_URL
+              value: "http://ia-recuerdo:7438"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ia-buscar
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5000
+      targetPort: 5000
+  selector:
+    app: ia-buscar

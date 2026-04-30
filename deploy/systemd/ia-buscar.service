@@ -1,0 +1,16 @@
+[Unit]
+Description=IA_Buscar MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=ia-buscar
+ExecStart=/opt/ia-buscar/bin/ia-buscar -transport http -http-addr :8080 -searxng-url http://localhost:8888
+Restart=always
+RestartSec=5
+
+Environment=SEARXNG_URL=http://localhost:8888
+Environment=MEMORY_URL=http://127.0.0.1:7438
+
+[Install]
+WantedBy=multi-user.target
