@@ -12,6 +12,7 @@ import (
 
 	"github.com/thiscloud/ia-buscar/internal/cache"
 	"github.com/thiscloud/ia-buscar/internal/memory"
+	"github.com/thiscloud/ia-buscar/internal/observability"
 	"github.com/thiscloud/ia-buscar/pkg/types"
 )
 
@@ -37,6 +38,11 @@ func (c *NuGetConnector) Search(ctx context.Context, req *types.SearchRequest) (
 	start := time.Now()
 	query := strings.TrimSpace(req.Query)
 	maxResults := getMaxResults(req.MaxResults, 10)
+
+	ctx, span := observability.StartSpan(ctx, c.Name(), req.Query)
+	defer func() {
+		observability.EndSpan(span, 0, nil)
+	}()
 
 	cacheKey := cache.GenerateCacheKey(query, []string{"nuget"})
 	if cached, ok, _ := c.cacheSvc.Get(ctx, cacheKey); ok {

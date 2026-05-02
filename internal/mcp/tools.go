@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/thiscloud/ia-buscar/internal/connectors"
+	"github.com/thiscloud/ia-buscar/internal/search"
 	"github.com/thiscloud/ia-buscar/pkg/types"
 )
 
@@ -32,9 +33,18 @@ func (s *Server) registerTools() {
 			t.Handler = s.makeSearchHandler("pypi")
 		case "search_docker_hub":
 			t.Handler = s.makeSearchHandler("dockerhub")
-		case "search_news", "search_doc_oficial", "search_local_index",
-			"search_academic", "search_reddit", "search_youtube", "search_images":
+		case "search_doc_oficial", "search_local_index":
 			t.Handler = s.makeSearchHandler("web")
+		case "search_academic":
+			t.Handler = s.makeSearchHandler("academic")
+		case "search_reddit":
+			t.Handler = s.makeSearchHandler("reddit")
+		case "search_youtube":
+			t.Handler = s.makeSearchHandler("youtube")
+		case "search_images":
+			t.Handler = s.makeSearchHandler("images")
+		case "search_news":
+			t.Handler = s.makeSearchHandler("news")
 		case "fetch_url":
 			t.Handler = s.makeFetchHandler("fetch")
 		case "fetch_and_extract":
@@ -76,7 +86,27 @@ func (s *Server) makeSearchHandler(source string) func(ctx context.Context, args
 				Errors:     []string{"connector manager not initialized"},
 			}, nil
 		}
-		return s.connectorManager.Search(ctx, source, &req)
+
+		var plan *search.SearchPlan
+		if s.planner != nil {
+			plan = s.planner.Plan(req.Query, &req)
+		}
+
+		resp, err := s.connectorManager.Search(ctx, source, &req)
+		if err != nil {
+			return nil, err
+		}
+
+		if plan != nil {
+			if len(plan.Connectors) > 0 {
+				resp.SourcesUsed = []string{source}
+			}
+			if plan.Intent != "" {
+				resp.Warnings = append(resp.Warnings, "intent: "+plan.Intent)
+			}
+		}
+
+		return resp, nil
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/thiscloud/ia-buscar/internal/cache"
 	"github.com/thiscloud/ia-buscar/internal/memory"
+	"github.com/thiscloud/ia-buscar/internal/observability"
 	"github.com/thiscloud/ia-buscar/pkg/types"
 )
 
@@ -38,11 +39,18 @@ func (c *StackOverflowConnector) Search(ctx context.Context, req *types.SearchRe
 	query := strings.TrimSpace(req.Query)
 	maxResults := getMaxResults(req.MaxResults, 10)
 
+	ctx, span := observability.StartSpan(ctx, c.Name(), req.Query)
+	defer func() {
+		observability.EndSpan(span, 0, nil)
+	}()
+
+	var err error
+
 	cacheKey := cache.GenerateCacheKey(query, []string{"stackoverflow"})
 	if cached, ok, _ := c.cacheSvc.Get(ctx, cacheKey); ok {
 		log.Printf("[stackoverflow] cache hit for query: %s", query)
 		cachedResp := &types.SearchResponse{}
-		if err := json.Unmarshal(cached.Payload, cachedResp); err == nil {
+		if err = json.Unmarshal(cached.Payload, cachedResp); err == nil {
 			cachedResp.Cached = true
 			return cachedResp, nil
 		}

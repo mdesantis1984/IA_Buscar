@@ -6,6 +6,7 @@ import (
 
 	"github.com/thiscloud/ia-buscar/internal/cache"
 	"github.com/thiscloud/ia-buscar/internal/memory"
+	"github.com/thiscloud/ia-buscar/internal/normalization"
 	"github.com/thiscloud/ia-buscar/pkg/types"
 )
 
@@ -61,6 +62,8 @@ func (m *ConnectorManager) SearchAll(ctx context.Context, req *types.SearchReque
 		}
 	}
 
+	allResults = deduplicateResults(allResults)
+
 	sources := make([]string, 0, len(sourcesUsed))
 	for s := range sourcesUsed {
 		sources = append(sources, s)
@@ -72,6 +75,23 @@ func (m *ConnectorManager) SearchAll(ctx context.Context, req *types.SearchReque
 		SourcesUsed: sources,
 		Errors:      errors,
 	}, nil
+}
+
+func deduplicateResults(results []types.SearchResultItem) []types.SearchResultItem {
+	seen := make(map[string]bool)
+	deduped := make([]types.SearchResultItem, 0, len(results))
+
+	for _, r := range results {
+		canonical := normalization.ExtractCanonicalURL(r.URL)
+		if seen[canonical] {
+			continue
+		}
+		seen[canonical] = true
+		r.CanonicalURL = canonical
+		deduped = append(deduped, r)
+	}
+
+	return deduped
 }
 
 func (m *ConnectorManager) GetConnector(name string) (types.SearchConnector, bool) {

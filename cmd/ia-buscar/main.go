@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/thiscloud/ia-buscar/internal/auth"
 	"github.com/thiscloud/ia-buscar/internal/cache"
 	"github.com/thiscloud/ia-buscar/internal/connectors"
 	"github.com/thiscloud/ia-buscar/internal/fetch"
@@ -23,11 +24,12 @@ import (
 var (
 	transport       = flag.String("transport", "stdio", "Transport mode: stdio or http")
 	httpAddr        = flag.String("http-addr", ":8080", "HTTP server address")
-	searxngURL      = flag.String("searxng-url", "http://localhost:8888", "SearxNG URL")
+	searxngURL      = flag.String("searxng-url", "http://10.0.0.201:8080", "SearxNG URL")
 	cacheTTL        = flag.Int("cache-ttl", 300, "Cache TTL in seconds")
 	memoryURL       = flag.String("memory-url", "http://127.0.0.1:7438", "IA_Recuerdo service URL")
 	memoryKey       = flag.String("memory-apikey", "", "IA_Recuerdo API key")
 	fetchTimeoutMs  = flag.Int("fetch-timeout-ms", 30000, "Fetch timeout in milliseconds")
+	authKey         = flag.String("auth-key", "", "API key for authentication (optional)")
 )
 
 func main() {
@@ -43,8 +45,11 @@ func main() {
 	synthSvc := synthesis.NewService()
 	memClient := memory.NewClient(*memoryURL, "ia-buscar", *memoryKey)
 	_ = observability.New()
+	observability.InitTracing("ia-buscar")
+	authValidator := auth.NewValidator(*authKey)
 
 	cm := search.NewConnectorManager(cacheSvc, memClient)
+	planner := search.NewPlanner()
 	cm.Register(connectors.NewWebConnector(*searxngURL, cacheSvc, memClient))
 	cm.Register(connectors.NewGitHubConnector("", cacheSvc, memClient))
 	cm.Register(connectors.NewStackOverflowConnector(cacheSvc, memClient))
@@ -52,12 +57,13 @@ func main() {
 	cm.Register(connectors.NewNuGetConnector(cacheSvc, memClient))
 	cm.Register(connectors.NewPyPIConnector(cacheSvc, memClient))
 	cm.Register(connectors.NewDockerHubConnector(cacheSvc, memClient))
-	cm.Register(connectors.NewAcademicConnector(cacheSvc, memClient))
+	cm.Register(connectors.NewAcademicConnector(*searxngURL, cacheSvc, memClient))
 	cm.Register(connectors.NewRedditConnector(cacheSvc, memClient))
-	cm.Register(connectors.NewYouTubeConnector(cacheSvc, memClient))
-	cm.Register(connectors.NewImagesConnector(cacheSvc, memClient))
+	cm.Register(connectors.NewYouTubeConnector(*searxngURL, cacheSvc, memClient))
+	cm.Register(connectors.NewImagesConnector(*searxngURL, cacheSvc, memClient))
+	cm.Register(connectors.NewNewsConnector(*searxngURL, cacheSvc, memClient))
 
-	server := mcp.NewServer(cm, *transport, *httpAddr, *searxngURL, *cacheTTL, *memoryURL, *memoryKey, *fetchTimeoutMs, fetchSvc, synthSvc, cacheSvc, historySvc)
+	server := mcp.NewServer(cm, planner, *transport, *httpAddr, *searxngURL, *cacheTTL, *memoryURL, *memoryKey, *fetchTimeoutMs, fetchSvc, synthSvc, cacheSvc, historySvc, authValidator)
 	_ = searchSvc
 	_ = memClient
 	var trans mcp.Transport

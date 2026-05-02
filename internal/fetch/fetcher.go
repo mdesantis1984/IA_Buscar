@@ -82,9 +82,10 @@ func (s *FetcherService) isAllowedURL(rawURL string) error {
 		return fmt.Errorf("URL host %s is not allowed (internal host)", host)
 	}
 
-	if ip := net.ParseIP(host); ip != nil {
+	hostNoPort := parsed.Hostname()
+	if ip := net.ParseIP(hostNoPort); ip != nil {
 		if isPrivateIP(ip) {
-			return fmt.Errorf("private IP addresses are not allowed: %s", host)
+			return fmt.Errorf("private IP addresses are not allowed: %s", hostNoPort)
 		}
 	}
 
@@ -276,7 +277,7 @@ func (s *FetcherService) ValidateURL(ctx context.Context, rawURL string) (bool, 
 	}
 
 	if err := s.isAllowedURL(rawURL); err != nil {
-		return false, nil
+		return false, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, rawURL, nil)

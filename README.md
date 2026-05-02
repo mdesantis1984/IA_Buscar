@@ -33,11 +33,11 @@ Servicio MCP de búsqueda, extracción, síntesis y citación para agentes IA lo
 
 ---
 
-## Conectores (13 disponibles)
+## Conectores (16 disponibles)
 
 | Conector | Fuente | Descripción |
 |---|---|---|
-| `search_web` | SearxNG | Búsqueda web general descentralizada |
+| `search_web` | SearxNG (brave) | Búsqueda web general descentralizada |
 | `search_github` | GitHub API | Repositorios, archivos y commits |
 | `search_github_pr` | GitHub API | Pull requests |
 | `search_github_issue` | GitHub API | Issues |
@@ -46,10 +46,11 @@ Servicio MCP de búsqueda, extracción, síntesis y citación para agentes IA lo
 | `search_nuget` | NuGet Gallery | Paquetes .NET |
 | `search_pypi` | PyPI | Paquetes Python |
 | `search_docker_hub` | Docker Hub | Imágenes Docker |
-| `search_academic` | Semantic Scholar | Papers y referencias académicas |
+| `search_academic` | SearxNG (arxiv) | Papers y referencias académicas |
 | `search_reddit` | Reddit | Discusiones y experiencias reales |
-| `search_youtube` | Invidious/YouTube | Tutoriales y demos |
-| `search_images` | DuckDuckGo Images | Diagramas y material visual |
+| `search_youtube` | SearxNG (youtube,brave) | Tutoriales y demos |
+| `search_images` | SearxNG (bing images) | Diagramas y material visual |
+| `search_news` | SearxNG (qwant news) | Noticias y actualidad |
 
 ---
 
@@ -152,6 +153,13 @@ CT-BUSCAR (Go Service :5000)
 ---
 
 ## Changelog
+
+### 1.1.0 — 2026-05-02
+- **SearxNG Migration**: Images, News, YouTube, Academic ahora usan SearxNG en LXC 201 (10.0.0.201:8080).
+- Conectores migrados: search_images, search_news, search_youtube, search_academic.
+- Se eliminaron APIs deprecated (Invidious, Semantic Scholar).
+- Proceso duplicado identificado y resuelto (usuario 100997).
+- Deploy: `/opt/ia-buscar/bin/ia-buscar` en LXC 15.
 
 ### 1.0.0 — 2026-04-30
 - Servicio MCP de búsqueda inicial con 13 conectores.

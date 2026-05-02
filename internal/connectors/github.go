@@ -12,6 +12,7 @@ import (
 
 	"github.com/thiscloud/ia-buscar/internal/cache"
 	"github.com/thiscloud/ia-buscar/internal/memory"
+	"github.com/thiscloud/ia-buscar/internal/observability"
 	"github.com/thiscloud/ia-buscar/pkg/types"
 )
 
@@ -44,6 +45,13 @@ func (c *GitHubConnector) searchRepositories(ctx context.Context, req *types.Sea
 	query := sanitizeQuery(req.Query)
 	maxResults := getMaxResults(req.MaxResults, 10)
 
+	ctx, span := observability.StartSpan(ctx, c.Name(), req.Query)
+	var results []types.SearchResultItem
+	var err error
+	defer func() {
+		observability.EndSpan(span, len(results), err)
+	}()
+
 	cacheKey := cache.GenerateCacheKey(query, []string{"github", "repo"})
 	if cached, ok, _ := c.cacheSvc.Get(ctx, cacheKey); ok {
 		log.Printf("[github] cache hit for query: %s", query)
@@ -59,7 +67,7 @@ func (c *GitHubConnector) searchRepositories(ctx context.Context, req *types.Sea
 		apiURL += "&language=" + url.QueryEscape(req.Language)
 	}
 
-	results, err := c.doGitHubRequest(ctx, apiURL, "repo")
+	results, err = c.doGitHubRequest(ctx, apiURL, "repo")
 	if err != nil {
 		log.Printf("[github] search error: %v", err)
 	}
