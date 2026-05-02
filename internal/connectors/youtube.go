@@ -12,22 +12,23 @@ import (
 
 	"github.com/thiscloud/ia-buscar/internal/cache"
 	"github.com/thiscloud/ia-buscar/internal/memory"
+	"github.com/thiscloud/ia-buscar/internal/observability"
 	"github.com/thiscloud/ia-buscar/pkg/types"
 )
 
 type YouTubeConnector struct {
-	baseURL    string
+	searxngURL string
 	cacheSvc   *cache.Service
 	memClient  *memory.Client
 	httpClient *http.Client
 }
 
-func NewYouTubeConnector(cacheSvc *cache.Service, memClient *memory.Client) *YouTubeConnector {
+func NewYouTubeConnector(searxngURL string, cacheSvc *cache.Service, memClient *memory.Client) *YouTubeConnector {
 	return &YouTubeConnector{
-		baseURL:    "https://yewtu.be",
+		searxngURL: searxngURL,
 		cacheSvc:   cacheSvc,
 		memClient:  memClient,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -38,7 +39,12 @@ func (c *YouTubeConnector) Search(ctx context.Context, req *types.SearchRequest)
 	query := strings.TrimSpace(req.Query)
 	maxResults := getMaxResults(req.MaxResults, 10)
 
-	cacheKey := cache.GenerateCacheKey(query, []string{"youtube"})
+	ctx, span := observability.StartSpan(ctx, c.Name(), req.Query)
+	defer func() {
+		observability.EndSpan(span, 0, nil)
+	}()
+
+	cacheKey := cache.GenerateCacheKey(query, []string{"youtube", "searxng"})
 	if cached, ok, _ := c.cacheSvc.Get(ctx, cacheKey); ok {
 		log.Printf("[youtube] cache hit for query: %s", query)
 		cachedResp := &types.SearchResponse{}
@@ -48,10 +54,7 @@ func (c *YouTubeConnector) Search(ctx context.Context, req *types.SearchRequest)
 		}
 	}
 
-	apiURL := fmt.Sprintf("%s/api/v1/search?q=%s&count=%d",
-		c.baseURL, url.QueryEscape(query), maxResults)
-
-	results, err := c.doYouTubeRequest(ctx, apiURL)
+	results, err := c.searchSearxng(ctx, query, maxResults)
 	if err != nil {
 		log.Printf("[youtube] search error: %v", err)
 	}
@@ -73,82 +76,138 @@ func (c *YouTubeConnector) Search(ctx context.Context, req *types.SearchRequest)
 	return resp, nil
 }
 
-func (c *YouTubeConnector) doYouTubeRequest(ctx context.Context, apiURL string) ([]types.SearchResultItem, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+func (c *YouTubeConnector) searchSearxng(ctx context.Context, query string, maxResults int) ([]types.SearchResultItem, error) {
+	time.Sleep(500 * time.Millisecond)
+
+	params := url.Values{}
+	params.Set("q", query)
+	params.Set("format", "json")
+	params.Set("engines", "youtube,brave")
+
+	apiURL := c.searxngURL + "/search?" + params.Encode()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return []types.SearchResultItem{}, err
 	}
-	req.Header.Set("Accept", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return []types.SearchResultItem{}, fmt.Errorf("request failed: %w", err)
+		return []types.SearchResultItem{}, fmt.Errorf("searxng request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return []types.SearchResultItem{}, fmt.Errorf("API error: %d", resp.StatusCode)
+		return []types.SearchResultItem{}, fmt.Errorf("searxng error: %d", resp.StatusCode)
 	}
 
-	var data []struct {
-		VideoID      string `json:"videoId"`
-		Title        string `json:"title"`
-		Description  string `json:"description"`
-		Author       string `json:"author"`
-		Length       string `json:"length"`
-		ViewCount    string `json:"viewCount"`
-		Published    int64  `json:"published"`
-		URL          string `json:"url"`
-		Type         string `json:"type"`
+	var searxngResp struct {
+		Results []struct {
+			Title       string      `json:"title"`
+			URL         string      `json:"url"`
+			Content     string      `json:"content"`
+			Source      string      `json:"source"`
+			Engine      string      `json:"engine"`
+			Template    string      `json:"template"`
+			ParsedURL   interface{} `json:"parsed_url"`
+			Thumbnail   string      `json:"thumbnail"`
+			PublishedDate string    `json:"publishedDate"`
+		} `json:"results"`
+		UnresponsiveEngines [][]interface{} `json:"unresponsive_engines"`
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return []types.SearchResultItem{}, err
+	if err := json.NewDecoder(resp.Body).Decode(&searxngResp); err != nil {
+		return []types.SearchResultItem{}, fmt.Errorf("searxng decode error: %w", err)
 	}
 
-	results := make([]types.SearchResultItem, 0, len(data))
-	for _, item := range data {
-		if item.Type != "video" {
+	results := make([]types.SearchResultItem, 0, len(searxngResp.Results))
+	for i, item := range searxngResp.Results {
+		if i >= maxResults {
+			break
+		}
+
+		if !isVideoURL(item.URL) {
 			continue
 		}
 
-		snippet := item.Description
-		if len(snippet) > 300 {
-			snippet = snippet[:300] + "..."
+		engine := item.Engine
+		if engine == "" {
+			engine = "searxng"
 		}
 
-		videoURL := item.URL
-		if videoURL == "" && item.VideoID != "" {
-			videoURL = "https://www.youtube.com/watch?v=" + item.VideoID
-		}
-
-		publishedAt := time.Unix(item.Published, 0)
+		videoID := extractYouTubeVideoID(item.URL)
 
 		results = append(results, types.SearchResultItem{
-			Title:       item.Title,
-			URL:         videoURL,
-			Snippet:     snippet,
-			Source:      "youtube",
-			Type:        "video",
-			Score:       parseViewCount(item.ViewCount),
-			PublishedAt: &publishedAt,
-			Author:      item.Author,
-			Tags:        []string{},
-			CitationID:  "youtube:" + item.VideoID,
+			Title:   item.Title,
+			URL:     item.URL,
+			Snippet: truncateSnippet(item.Content),
+			Source:  engine,
+			Type:    "video",
+			Score:   float64(maxResults - len(results)),
+			Tags:    []string{},
+			CitationID: "youtube:" + videoID,
 		})
+	}
+
+	if len(results) == 0 && len(searxngResp.UnresponsiveEngines) > 0 {
+		return []types.SearchResultItem{}, fmt.Errorf("all video engines unresponsive")
 	}
 
 	return results, nil
 }
 
-func parseViewCount(vc string) float64 {
-	var count float64
-	for _, c := range vc {
-		if c >= '0' && c <= '9' {
-			count = count*10 + float64(c-'0')
+func isVideoURL(urlStr string) bool {
+	videoHosts := []string{
+		"youtube.com",
+		"youtu.be",
+		"youtube-nocookie.com",
+		"bilibili.com",
+		"vimeo.com",
+		"dailymotion.com",
+		"twitch.tv",
+	}
+	urlLower := strings.ToLower(urlStr)
+	for _, host := range videoHosts {
+		if strings.Contains(urlLower, host) {
+			return true
 		}
 	}
-	return count
+	return false
+}
+
+func extractYouTubeVideoID(urlStr string) string {
+	if strings.Contains(urlStr, "youtu.be/") {
+		parts := strings.Split(urlStr, "youtu.be/")
+		if len(parts) > 1 {
+			id := parts[1]
+			if idx := strings.Index(id, "?"); idx > 0 {
+				return id[:idx]
+			}
+			if idx := strings.Index(id, "&"); idx > 0 {
+				return id[:idx]
+			}
+			return id
+		}
+	}
+	if strings.Contains(urlStr, "watch?v=") {
+		parts := strings.Split(urlStr, "watch?v=")
+		if len(parts) > 1 {
+			id := parts[1]
+			if idx := strings.Index(id, "&"); idx > 0 {
+				return id[:idx]
+			}
+			return id
+		}
+	}
+	return "unknown"
+}
+
+func truncateSnippet(snippet string) string {
+	if len(snippet) > 300 {
+		return snippet[:300] + "..."
+	}
+	return snippet
 }
 
 func (c *YouTubeConnector) saveToMemory(ctx context.Context, query string, count int, latency time.Duration) {

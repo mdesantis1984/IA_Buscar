@@ -16,15 +16,15 @@ import (
 	"github.com/thiscloud/ia-buscar/pkg/types"
 )
 
-type AcademicConnector struct {
+type NewsConnector struct {
 	searxngURL string
 	cacheSvc   *cache.Service
 	memClient  *memory.Client
 	httpClient *http.Client
 }
 
-func NewAcademicConnector(searxngURL string, cacheSvc *cache.Service, memClient *memory.Client) *AcademicConnector {
-	return &AcademicConnector{
+func NewNewsConnector(searxngURL string, cacheSvc *cache.Service, memClient *memory.Client) *NewsConnector {
+	return &NewsConnector{
 		searxngURL: searxngURL,
 		cacheSvc:   cacheSvc,
 		memClient:  memClient,
@@ -32,9 +32,9 @@ func NewAcademicConnector(searxngURL string, cacheSvc *cache.Service, memClient 
 	}
 }
 
-func (c *AcademicConnector) Name() string { return "academic" }
+func (c *NewsConnector) Name() string { return "news" }
 
-func (c *AcademicConnector) Search(ctx context.Context, req *types.SearchRequest) (*types.SearchResponse, error) {
+func (c *NewsConnector) Search(ctx context.Context, req *types.SearchRequest) (*types.SearchResponse, error) {
 	start := time.Now()
 	query := strings.TrimSpace(req.Query)
 	maxResults := getMaxResults(req.MaxResults, 10)
@@ -44,9 +44,9 @@ func (c *AcademicConnector) Search(ctx context.Context, req *types.SearchRequest
 		observability.EndSpan(span, 0, nil)
 	}()
 
-	cacheKey := cache.GenerateCacheKey(query, []string{"academic", "searxng"})
+	cacheKey := cache.GenerateCacheKey(query, []string{"news", "searxng"})
 	if cached, ok, _ := c.cacheSvc.Get(ctx, cacheKey); ok {
-		log.Printf("[academic] cache hit for query: %s", query)
+		log.Printf("[news] cache hit for query: %s", query)
 		cachedResp := &types.SearchResponse{}
 		if err := json.Unmarshal(cached.Payload, cachedResp); err == nil {
 			cachedResp.Cached = true
@@ -56,13 +56,13 @@ func (c *AcademicConnector) Search(ctx context.Context, req *types.SearchRequest
 
 	results, err := c.searchSearxng(ctx, query, maxResults, req)
 	if err != nil {
-		log.Printf("[academic] search error: %v", err)
+		log.Printf("[news] search error: %v", err)
 	}
 
 	resp := &types.SearchResponse{
 		Query:       req.Query,
 		Results:     results,
-		SourcesUsed: []string{"academic"},
+		SourcesUsed: []string{"news"},
 		Cached:      false,
 	}
 	if len(results) == 0 && err != nil {
@@ -72,25 +72,26 @@ func (c *AcademicConnector) Search(ctx context.Context, req *types.SearchRequest
 	c.saveToMemory(ctx, query, len(results), time.Since(start))
 	c.cacheResults(ctx, cacheKey, resp)
 
-	log.Printf("[academic] search completed: query=%s, results=%d, latency=%v", query, len(results), time.Since(start))
+	log.Printf("[news] search completed: query=%s, results=%d, latency=%v", query, len(results), time.Since(start))
 	return resp, nil
 }
 
-func (c *AcademicConnector) searchSearxng(ctx context.Context, query string, maxResults int, req *types.SearchRequest) ([]types.SearchResultItem, error) {
+func (c *NewsConnector) searchSearxng(ctx context.Context, query string, maxResults int, req *types.SearchRequest) ([]types.SearchResultItem, error) {
 	time.Sleep(500 * time.Millisecond)
 
 	params := url.Values{}
 	params.Set("q", query)
 	params.Set("format", "json")
-	params.Set("categories", "science")
-	params.Set("engines", "arxiv,duckduckgo")
+	params.Set("categories", "news")
+	params.Set("engines", "")
 	if req.Language != "" {
 		params.Set("language", req.Language)
-	} else {
-		params.Set("language", "en")
 	}
 	if req.TimeRange != "" {
 		params.Set("time_range", req.TimeRange)
+	}
+	if req.SafeSearch {
+		params.Set("safesearch", "1")
 	}
 
 	apiURL := c.searxngURL + "/search?" + params.Encode()
@@ -121,7 +122,6 @@ func (c *AcademicConnector) searchSearxng(ctx context.Context, query string, max
 			ParsedURL   interface{} `json:"parsed_url"`
 			PublishedDate string    `json:"publishedDate"`
 		} `json:"results"`
-		UnresponsiveEngines [][]interface{} `json:"unresponsive_engines"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&searxngResp); err != nil {
@@ -133,89 +133,35 @@ func (c *AcademicConnector) searchSearxng(ctx context.Context, query string, max
 		if i >= maxResults {
 			break
 		}
-		if !isAcademicURL(item.URL) {
-			continue
-		}
-
-		engine := item.Engine
-		if engine == "" {
-			engine = "searxng"
-		}
-
-		publishedAt := parsePublishedDate(item.PublishedDate)
+		parsedDomain := extractDomain(item.ParsedURL)
 
 		results = append(results, types.SearchResultItem{
 			Title:       item.Title,
 			URL:         item.URL,
-			Snippet:     truncateSnippet(item.Content),
-			Source:      engine,
-			Type:        "paper",
+			Snippet:     item.Content,
+			Source:      item.Engine,
+			Type:        "article",
 			Score:       float64(maxResults - i),
-			PublishedAt: publishedAt,
-			Tags:        []string{},
-			CitationID:  fmt.Sprintf("academic:%s:%d", extractDomain(item.ParsedURL), i),
+			CitationID:  fmt.Sprintf("news:%s:%d", parsedDomain, i),
 		})
-	}
-
-	if len(results) == 0 && len(searxngResp.UnresponsiveEngines) > 0 {
-		return []types.SearchResultItem{}, fmt.Errorf("all academic engines unresponsive")
 	}
 
 	return results, nil
 }
 
-func isAcademicURL(urlStr string) bool {
-	academicHosts := []string{
-		"arxiv.org",
-		"scholar.google",
-		"semanticscholar.org",
-		"researchgate.net",
-		"academia.edu",
-		"pubmed.ncbi.nlm.nih.gov",
-		"ieee.org",
-		"acm.org",
-		"springer.com",
-		"nature.com",
-		"sciencedirect.com",
-		"wiley.com",
-		"arxiv.org/abs",
-		"doi.org",
-	}
-	urlLower := strings.ToLower(urlStr)
-	for _, host := range academicHosts {
-		if strings.Contains(urlLower, host) {
-			return true
-		}
-	}
-	return strings.Contains(urlLower, "pdf") || strings.Contains(urlLower, "paper") || strings.Contains(urlLower, "research")
-}
-
-func parsePublishedDate(dateStr string) *time.Time {
-	if dateStr == "" {
-		return nil
-	}
-	formats := []string{"2006-01-02", "2006-01-02T15:04:05Z", "2006-01-02T15:04:05"}
-	for _, format := range formats {
-		if t, err := time.Parse(format, dateStr); err == nil {
-			return &t
-		}
-	}
-	return nil
-}
-
-func (c *AcademicConnector) saveToMemory(ctx context.Context, query string, count int, latency time.Duration) {
+func (c *NewsConnector) saveToMemory(ctx context.Context, query string, count int, latency time.Duration) {
 	if c.memClient == nil {
 		return
 	}
 	c.memClient.Save(ctx, &memory.Observation{
-		Title:    fmt.Sprintf("Academic search: %s", query),
+		Title:    fmt.Sprintf("News search: %s", query),
 		Content:  fmt.Sprintf("**Query**: %s\n**Results**: %d\n**Latency**: %v", query, count, latency),
 		Type:     "search",
-		TopicKey: fmt.Sprintf("academic-%s", sanitizeTopicKey(query)),
+		TopicKey: fmt.Sprintf("news-%s", sanitizeTopicKey(query)),
 	})
 }
 
-func (c *AcademicConnector) cacheResults(ctx context.Context, cacheKey string, resp *types.SearchResponse) {
+func (c *NewsConnector) cacheResults(ctx context.Context, cacheKey string, resp *types.SearchResponse) {
 	if c.cacheSvc == nil {
 		return
 	}

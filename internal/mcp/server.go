@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/thiscloud/ia-buscar/internal/auth"
 	"github.com/thiscloud/ia-buscar/internal/cache"
 	"github.com/thiscloud/ia-buscar/internal/fetch"
 	"github.com/thiscloud/ia-buscar/internal/observability"
@@ -24,11 +25,13 @@ type Server struct {
 	memoryAPIKey     string
 	toolsRegistry    []Tool
 	connectorManager *search.ConnectorManager
+	planner          *search.Planner
 	met              *observability.Metrics
 	fetcherService   *fetch.FetcherService
 	synthesisService *synthesis.Service
 	cacheService     *cache.Service
 	historyService   *cache.HistoryService
+	authValidator    *auth.Validator
 }
 
 type Tool struct {
@@ -38,7 +41,7 @@ type Tool struct {
 	Handler     func(ctx context.Context, args json.RawMessage) (interface{}, error)
 }
 
-func NewServer(connectorManager *search.ConnectorManager, transport, httpAddr, searxngURL string, cacheTTL int, memoryURL, memoryAPIKey string, fetchTimeoutMs int, fetchSvc *fetch.FetcherService, synthSvc *synthesis.Service, cacheSvc *cache.Service, historySvc *cache.HistoryService) *Server {
+func NewServer(connectorManager *search.ConnectorManager, planner *search.Planner, transport, httpAddr, searxngURL string, cacheTTL int, memoryURL, memoryAPIKey string, fetchTimeoutMs int, fetchSvc *fetch.FetcherService, synthSvc *synthesis.Service, cacheSvc *cache.Service, historySvc *cache.HistoryService, authValidator *auth.Validator) *Server {
 	s := &Server{
 		transport:        transport,
 		httpAddr:         httpAddr,
@@ -47,11 +50,13 @@ func NewServer(connectorManager *search.ConnectorManager, transport, httpAddr, s
 		memoryURL:        memoryURL,
 		memoryAPIKey:     memoryAPIKey,
 		connectorManager: connectorManager,
+		planner:          planner,
 		met:              observability.New(),
 		fetcherService:   fetchSvc,
 		synthesisService: synthSvc,
 		cacheService:     cacheSvc,
 		historyService:   historySvc,
+		authValidator:    authValidator,
 	}
 	s.buildToolsRegistry()
 	s.registerTools()
@@ -436,12 +441,20 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Start(ctx context.Context) error {
 	if s.transport == "http" {
 		mux := http.NewServeMux()
+
+		var handler http.Handler
+		handler = mux
+
+		if s.authValidator != nil {
+			handler = s.authValidator.Middleware(handler)
+		}
+
 		mux.HandleFunc("/mcp", s.HandleHTTP)
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok"})
 		})
 		mux.HandleFunc("/metrics", s.met.Handler())
-		srv := &http.Server{Addr: s.httpAddr, Handler: mux}
+		srv := &http.Server{Addr: s.httpAddr, Handler: handler}
 		go srv.ListenAndServe()
 		return nil
 	}

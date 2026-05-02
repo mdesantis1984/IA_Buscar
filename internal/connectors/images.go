@@ -7,28 +7,28 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/thiscloud/ia-buscar/internal/cache"
 	"github.com/thiscloud/ia-buscar/internal/memory"
+	"github.com/thiscloud/ia-buscar/internal/observability"
 	"github.com/thiscloud/ia-buscar/pkg/types"
 )
 
 type ImagesConnector struct {
-	baseURL    string
+	searxngURL string
 	cacheSvc   *cache.Service
 	memClient  *memory.Client
 	httpClient *http.Client
 }
 
-func NewImagesConnector(cacheSvc *cache.Service, memClient *memory.Client) *ImagesConnector {
+func NewImagesConnector(searxngURL string, cacheSvc *cache.Service, memClient *memory.Client) *ImagesConnector {
 	return &ImagesConnector{
-		baseURL:    "https://duckduckgo.com",
+		searxngURL: searxngURL,
 		cacheSvc:   cacheSvc,
 		memClient:  memClient,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -39,7 +39,12 @@ func (c *ImagesConnector) Search(ctx context.Context, req *types.SearchRequest) 
 	query := strings.TrimSpace(req.Query)
 	maxResults := getMaxResults(req.MaxResults, 10)
 
-	cacheKey := cache.GenerateCacheKey(query, []string{"images"})
+	ctx, span := observability.StartSpan(ctx, c.Name(), req.Query)
+	defer func() {
+		observability.EndSpan(span, 0, nil)
+	}()
+
+	cacheKey := cache.GenerateCacheKey(query, []string{"images", "searxng"})
 	if cached, ok, _ := c.cacheSvc.Get(ctx, cacheKey); ok {
 		log.Printf("[images] cache hit for query: %s", query)
 		cachedResp := &types.SearchResponse{}
@@ -49,7 +54,7 @@ func (c *ImagesConnector) Search(ctx context.Context, req *types.SearchRequest) 
 		}
 	}
 
-	results, err := c.doImagesRequest(ctx, query, maxResults)
+	results, err := c.searchSearxng(ctx, query, maxResults)
 	if err != nil {
 		log.Printf("[images] search error: %v", err)
 	}
@@ -71,119 +76,81 @@ func (c *ImagesConnector) Search(ctx context.Context, req *types.SearchRequest) 
 	return resp, nil
 }
 
-func (c *ImagesConnector) doImagesRequest(ctx context.Context, query string, maxResults int) ([]types.SearchResultItem, error) {
-	apiURL := fmt.Sprintf("%s/?q=%s&ia=images&iax=1",
-		c.baseURL, url.QueryEscape(query))
+func (c *ImagesConnector) searchSearxng(ctx context.Context, query string, maxResults int) ([]types.SearchResultItem, error) {
+	time.Sleep(500 * time.Millisecond)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	params := url.Values{}
+	params.Set("q", query)
+	params.Set("format", "json")
+	params.Set("categories", "images")
+	params.Set("engines", "")
+
+	apiURL := c.searxngURL + "/search?" + params.Encode()
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return []types.SearchResultItem{}, err
 	}
-	req.Header.Set("Accept", "text/html,application/xhtml+xml")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	httpReq.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
-		return []types.SearchResultItem{}, fmt.Errorf("request failed: %w", err)
+		return []types.SearchResultItem{}, fmt.Errorf("searxng request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return []types.SearchResultItem{}, fmt.Errorf("HTTP error: %d", resp.StatusCode)
+		return []types.SearchResultItem{}, fmt.Errorf("searxng error: %d", resp.StatusCode)
 	}
 
-	body, err := readResponseBody(resp)
-	if err != nil {
-		return []types.SearchResultItem{}, err
+	var searxngResp struct {
+		Results []struct {
+			Title       string      `json:"title"`
+			URL         string      `json:"url"`
+			Content     string      `json:"content"`
+			Source      string      `json:"source"`
+			Engine      string      `json:"engine"`
+			ImgSrc      string      `json:"img_src"`
+			ThumbnailSrc string     `json:"thumbnail_src"`
+			Template    string      `json:"template"`
+			ParsedURL   interface{} `json:"parsed_url"`
+		} `json:"results"`
+		UnresponsiveEngines [][]interface{} `json:"unresponsive_engines"`
 	}
 
-	results, err := parseImageResults(body, maxResults)
-	if err != nil {
-		return []types.SearchResultItem{}, err
+	if err := json.NewDecoder(resp.Body).Decode(&searxngResp); err != nil {
+		return []types.SearchResultItem{}, fmt.Errorf("searxng decode error: %w", err)
 	}
-	return results, nil
-}
 
-func readResponseBody(resp *http.Response) (string, error) {
-	buf := make([]byte, 0, 65536)
-	tmp := make([]byte, 4096)
-	reader := resp.Body
-	for {
-		n, err := reader.Read(tmp)
-		if n > 0 {
-			buf = append(buf, tmp[:n]...)
-			if len(buf) > 1024*1024 {
-				break
-			}
-		}
-		if err != nil {
+	results := make([]types.SearchResultItem, 0, len(searxngResp.Results))
+	for i, item := range searxngResp.Results {
+		if i >= maxResults {
 			break
 		}
-	}
-	return string(buf), nil
-}
+		parsedDomain := extractDomain(item.ParsedURL)
 
-var (
-	imageTitleRegex = regexp.MustCompile(`data-title="([^"]*)"`)
-	imageURLRegex   = regexp.MustCompile(`data-image="([^"]*)"`)
-	imageThumbRegex = regexp.MustCompile(`data-thumb="([^"]*)"`)
-	imageSourceRegex = regexp.MustCompile(`data-source="([^"]*)"`)
-)
-
-func parseImageResults(html string, maxResults int) ([]types.SearchResultItem, error) {
-	titles := imageTitleRegex.FindAllStringSubmatch(html, -1)
-	urls := imageURLRegex.FindAllStringSubmatch(html, -1)
-	thumbs := imageThumbRegex.FindAllStringSubmatch(html, -1)
-	sources := imageSourceRegex.FindAllStringSubmatch(html, -1)
-
-	minLen := min(len(titles), min(len(urls), min(len(thumbs), len(sources))))
-	if minLen == 0 {
-		return []types.SearchResultItem{}, nil
-	}
-
-	if minLen > maxResults {
-		minLen = maxResults
-	}
-
-	results := make([]types.SearchResultItem, 0, minLen)
-	for i := 0; i < minLen; i++ {
-		title := strings.TrimSpace(titles[i][1])
-		imageURL := strings.TrimSpace(urls[i][1])
-		thumbURL := strings.TrimSpace(thumbs[i][1])
-		source := strings.TrimSpace(sources[i][1])
-
-		if imageURL == "" || title == "" {
-			continue
+		imageURL := item.ImgSrc
+		if imageURL == "" {
+			imageURL = item.URL
 		}
 
-		cdnURL := thumbURL
-		if cdnURL == "" {
-			cdnURL = imageURL
+		engine := item.Engine
+		if engine == "" {
+			engine = "searxng"
 		}
 
 		results = append(results, types.SearchResultItem{
-			Title:       title,
+			Title:       item.Title,
 			URL:         imageURL,
-			Snippet:     fmt.Sprintf("Source: %s", source),
-			Source:      "duckduckgo-images",
+			Snippet:     fmt.Sprintf("Source: %s | Engine: %s", item.Source, engine),
+			Source:      engine,
 			Type:        "image",
-			Score:       1.0,
-			PublishedAt: nil,
-			Author:      source,
-			Tags:        []string{},
-			CitationID:  fmt.Sprintf("ddg:%d", i),
-			CanonicalURL: cdnURL,
+			Score:       float64(maxResults - i),
+			CitationID:  fmt.Sprintf("images:%s:%d", parsedDomain, i),
 		})
 	}
 
 	return results, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func (c *ImagesConnector) saveToMemory(ctx context.Context, query string, count int, latency time.Duration) {
